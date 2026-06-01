@@ -50,26 +50,44 @@ const COPY = {
     qrStartCamera: "Start camera",
     qrStopCamera: "Stop camera",
     qrUpload: "Scan saved QR image",
-    qrIdle: "Camera is off. Start the camera or upload a sample QR image.",
+    qrIdle: "Camera is off. Start the camera or upload a saved QR image.",
     qrActive:
       "Camera is active. Hold the QR code steady inside the frame.",
     qrFoundHeading: "Invitation found",
     qrFoundBody:
       "We found {name}. Please continue to old badge collection.",
     qrUnknown:
-      "This QR code is not linked to a record in the mockup dataset.",
+      "This QR code does not represent a user in the mockup dataset.",
     qrNoCodeImage:
       "No readable QR code was detected in the uploaded image.",
     qrUnsupported:
       "This browser does not expose native QR detection. Use a modern Chromium-based kiosk browser on localhost.",
     qrCameraDenied:
       "Camera access was not granted. You can still test with a saved QR image.",
+    qrLeadV2:
+      "Hold the invitation QR code inside the frame. The camera starts automatically and you can also upload a saved QR image.",
+    qrScanningHeading: "Scanning invitation QR code",
+    qrNotFoundHeading: "QR code does not match a user",
+    qrCameraHeading: "Camera status",
+    qrSampleLink: "Sample invitation QR codes",
     sampleQrs: "Sample invitation QR codes",
     sampleQrsLead:
       "Three local demo QR images are included for Kris Beerts, Jari Rooman and Vincent Haemerlinck.",
+    sampleQrsClose: "Close",
+    qrTipsTitle: "Scanning tips",
+    qrTipOne: "The camera starts automatically when this page opens.",
+    qrTipTwo: "Hold the QR code inside the guide frame and keep it flat.",
+    qrTipThree: "Move closer until the QR code fills most of the guide box.",
     collectorTitleKnown: "Insert your old Legic badge",
     collectorLeadKnown:
       "Confirmed user: {name}. Insert the old Legic badge into the slot labelled Collector. The card will be read, collected and will not be returned.",
+    collectorLeadKnownV2:
+      "Insert the old Legic badge into the slot labelled Collector. The card will be read, collected and will not be returned.",
+    collectorUserFoundTitle: "Matching user found",
+    collectorUserFoundBody:
+      "Invitation QR code recognized for {name}.",
+    collectorIdleKnown:
+      "Waiting for the old Legic badge in the Collector slot.",
     collectorTitleUnknown: "Collect old Legic badge",
     collectorLeadUnknown:
       "Insert the old Legic badge into the slot labelled Collector. For this mockup, select one of the sample badges before starting the collector.",
@@ -83,6 +101,10 @@ const COPY = {
       "Old Legic badge {badge} was read successfully and matches {name}. The badge has been collected and will not be returned.",
     collectorSuccessUnknown:
       "Old Legic badge {badge} was read successfully for {name}. Please continue with identity verification.",
+    collectorSuccessKnownV2:
+      "Old Legic badge {badge} was read successfully and matches {name}. Printing starts automatically.",
+    collectorSuccessUnknownV2:
+      "Old Legic badge {badge} was read successfully for {name}. Identity verification starts automatically.",
     collectorContinuePrint: "Continue to badge printing",
     collectorContinueIdentity: "Continue to identity check",
     identityTitle: "Scan identity card",
@@ -91,11 +113,19 @@ const COPY = {
     identityRecord: "Record identified from old badge",
     identityLabel: "Family name on identity card",
     identityButton: "Confirm identity card",
+    identityVisualTitle: "Place identity card on OCR scanner",
+    identityVisualLead:
+      "Position the card as shown, then type the family name below.",
     identityMismatch:
       "The scanned last name does not match the record that was read from the old badge.",
     printingTitle: "Printing and encoding your new badge",
     printingLead:
       "Please wait while the Hybrid card is encoded, personalized and quality checked.",
+    printingLeadV2:
+      "Please wait while the RFID card is encoded, personalized and quality checked.",
+    printingMatchTitle: "Successful match confirmed",
+    printingMatchBody:
+      "Invitation QR code and returned Legic badge matched for {name}.",
     printPreparing: "Preparing blank card",
     printEncoding: "Encoding hybrid chip",
     printPersonalizing: "Printing employee details",
@@ -104,6 +134,7 @@ const COPY = {
     printReady: "Your new badge is ready for collection.",
     badgeRoleEmployee: "Employee",
     badgeType: "Hybrid Card",
+    badgeTypeV2: "RFID Card",
     badgeNumber: "Badge number",
     completionTitle: "Badge issued successfully",
     completionBody:
@@ -477,6 +508,8 @@ function createInitialState() {
     qrStatus: "idle",
     qrMessage: "",
     qrLastRaw: "",
+    qrAutoStart: false,
+    qrSamplesOpen: false,
     collectorRunning: false,
     collectorProgress: 0,
     collectorComplete: false,
@@ -503,6 +536,9 @@ const runtime = {
   printInterval: 0,
   scanCanvas: null,
   scanContext: null,
+  autoStartTimeout: 0,
+  transitionTimeout: 0,
+  cameraStarting: false,
 };
 
 function t(key, vars = {}) {
@@ -584,6 +620,16 @@ function clearIntervals() {
     window.clearInterval(runtime.printInterval);
     runtime.printInterval = 0;
   }
+
+  if (runtime.autoStartTimeout) {
+    window.clearTimeout(runtime.autoStartTimeout);
+    runtime.autoStartTimeout = 0;
+  }
+
+  if (runtime.transitionTimeout) {
+    window.clearTimeout(runtime.transitionTimeout);
+    runtime.transitionTimeout = 0;
+  }
 }
 
 function stopCamera() {
@@ -600,9 +646,20 @@ function stopCamera() {
 
   runtime.stream = null;
   runtime.detectBusy = false;
+  runtime.cameraStarting = false;
 }
 
 function leaveCurrentFlow(nextStage) {
+  if (runtime.autoStartTimeout) {
+    window.clearTimeout(runtime.autoStartTimeout);
+    runtime.autoStartTimeout = 0;
+  }
+
+  if (runtime.transitionTimeout) {
+    window.clearTimeout(runtime.transitionTimeout);
+    runtime.transitionTimeout = 0;
+  }
+
   if (state.stage === "qr" && nextStage !== "qr") {
     stopCamera();
   }
@@ -679,6 +736,9 @@ function selectService(service) {
       selectedUserId: null,
       qrStatus: "idle",
       qrMessage: "",
+      qrLastRaw: "",
+      qrAutoStart: false,
+      qrSamplesOpen: false,
       collectorRunning: false,
       collectorProgress: 0,
       collectorComplete: false,
@@ -707,7 +767,10 @@ function chooseInvitationPath(hasQr) {
       qrStatus: "idle",
       qrMessage: "",
       qrLastRaw: "",
+      qrAutoStart: true,
+      qrSamplesOpen: false,
     });
+    startQrCamera();
     return;
   }
 
@@ -723,13 +786,49 @@ function chooseInvitationPath(hasQr) {
   });
 }
 
+function scheduleAutoTransition(callback, delayMs = 1000) {
+  if (runtime.transitionTimeout) {
+    window.clearTimeout(runtime.transitionTimeout);
+  }
+
+  runtime.transitionTimeout = window.setTimeout(() => {
+    runtime.transitionTimeout = 0;
+    callback();
+  }, delayMs);
+}
+
+function queueQrAutoStart() {
+  if (
+    state.stage !== "qr" ||
+    !state.qrAutoStart ||
+    state.qrStatus !== "idle" ||
+    runtime.stream ||
+    runtime.cameraStarting ||
+    runtime.autoStartTimeout
+  ) {
+    return;
+  }
+
+  runtime.autoStartTimeout = window.setTimeout(() => {
+    runtime.autoStartTimeout = 0;
+    if (state.stage === "qr" && state.qrAutoStart && state.qrStatus === "idle" && !runtime.stream) {
+      startQrCamera();
+    }
+  }, 80);
+}
+
 async function startQrCamera() {
+  if (runtime.cameraStarting || runtime.stream) {
+    return;
+  }
+
   const hasNativeDetector = "BarcodeDetector" in window;
   const hasJsQr = typeof window.jsQR === "function";
 
   if (!hasNativeDetector && !hasJsQr) {
     state.qrStatus = "unsupported";
     state.qrMessage = t("qrUnsupported");
+    state.qrAutoStart = false;
     render();
     return;
   }
@@ -737,8 +836,16 @@ async function startQrCamera() {
   if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
     state.qrStatus = "camera-error";
     state.qrMessage = t("qrCameraDenied");
+    state.qrAutoStart = false;
     render();
     return;
+  }
+
+  runtime.cameraStarting = true;
+
+  if (runtime.autoStartTimeout) {
+    window.clearTimeout(runtime.autoStartTimeout);
+    runtime.autoStartTimeout = 0;
   }
 
   runtime.detector = null;
@@ -756,20 +863,25 @@ async function startQrCamera() {
       audio: false,
       video: {
         facingMode: { ideal: "environment" },
-        width: { ideal: 1280 },
-        height: { ideal: 720 },
+        width: { ideal: 1920 },
+        height: { ideal: 1080 },
+        focusMode: { ideal: "continuous" },
       },
     });
 
+    state.qrAutoStart = false;
     state.qrStatus = "scanning";
     state.qrMessage = t("qrActive");
     render();
     attachVideoStream();
     runQrLoop();
   } catch (error) {
+    state.qrAutoStart = false;
     state.qrStatus = "camera-error";
     state.qrMessage = t("qrCameraDenied");
     render();
+  } finally {
+    runtime.cameraStarting = false;
   }
 }
 
@@ -843,6 +955,7 @@ async function scanQrFrame() {
 
 function stopQrCamera() {
   stopCamera();
+  state.qrAutoStart = false;
   state.qrStatus = "idle";
   state.qrMessage = t("qrIdle");
   render();
@@ -914,6 +1027,38 @@ function ensureScanCanvas(width, height) {
   return runtime.scanContext;
 }
 
+function buildScanRegions(width, height) {
+  const createRegion = (ratio) => {
+    const regionWidth = Math.round(width * ratio);
+    const regionHeight = Math.round(height * ratio);
+    return {
+      x: Math.round((width - regionWidth) / 2),
+      y: Math.round((height - regionHeight) / 2),
+      width: regionWidth,
+      height: regionHeight,
+    };
+  };
+
+  return [
+    { region: createRegion(0.56), upscale: 1.5, enhance: true },
+    { region: createRegion(0.7), upscale: 1.2, enhance: false },
+    { region: { x: 0, y: 0, width, height }, upscale: 1, enhance: false },
+  ];
+}
+
+function boostContrast(imageData) {
+  const enhanced = new Uint8ClampedArray(imageData.data);
+  const factor = 1.4;
+
+  for (let index = 0; index < enhanced.length; index += 4) {
+    enhanced[index] = Math.max(0, Math.min(255, (enhanced[index] - 128) * factor + 128));
+    enhanced[index + 1] = Math.max(0, Math.min(255, (enhanced[index + 1] - 128) * factor + 128));
+    enhanced[index + 2] = Math.max(0, Math.min(255, (enhanced[index + 2] - 128) * factor + 128));
+  }
+
+  return enhanced;
+}
+
 function detectWithJsQr(source) {
   if (typeof window.jsQR !== "function") {
     return [];
@@ -924,16 +1069,54 @@ function detectWithJsQr(source) {
     return [];
   }
 
-  const context = ensureScanCanvas(width, height);
-  context.clearRect(0, 0, width, height);
-  context.drawImage(source, 0, 0, width, height);
+  const scanRegions = buildScanRegions(width, height);
 
-  const imageData = context.getImageData(0, 0, width, height);
-  const result = window.jsQR(imageData.data, width, height, {
-    inversionAttempts: "attemptBoth",
-  });
+  for (const scan of scanRegions) {
+    const longestEdge = Math.max(scan.region.width, scan.region.height);
+    const maxEdge = scan.region.x === 0 && scan.region.y === 0 ? 1400 : 1600;
+    const scale = Math.min(scan.upscale, maxEdge / longestEdge);
+    const canvasWidth = Math.max(1, Math.round(scan.region.width * scale));
+    const canvasHeight = Math.max(1, Math.round(scan.region.height * scale));
+    const context = ensureScanCanvas(canvasWidth, canvasHeight);
 
-  return result ? [{ rawValue: result.data }] : [];
+    context.imageSmoothingEnabled = false;
+    context.clearRect(0, 0, canvasWidth, canvasHeight);
+    context.drawImage(
+      source,
+      scan.region.x,
+      scan.region.y,
+      scan.region.width,
+      scan.region.height,
+      0,
+      0,
+      canvasWidth,
+      canvasHeight
+    );
+
+    const imageData = context.getImageData(0, 0, canvasWidth, canvasHeight);
+    const baseResult = window.jsQR(imageData.data, canvasWidth, canvasHeight, {
+      inversionAttempts: "attemptBoth",
+    });
+
+    if (baseResult) {
+      return [{ rawValue: baseResult.data }];
+    }
+
+    if (scan.enhance) {
+      const enhancedResult = window.jsQR(
+        boostContrast(imageData),
+        canvasWidth,
+        canvasHeight,
+        { inversionAttempts: "attemptBoth" }
+      );
+
+      if (enhancedResult) {
+        return [{ rawValue: enhancedResult.data }];
+      }
+    }
+  }
+
+  return [];
 }
 
 async function detectQrFromSource(source) {
@@ -951,6 +1134,18 @@ async function detectQrFromSource(source) {
   return detectWithJsQr(source);
 }
 
+function getQrStatusHeading() {
+  if (state.qrStatus === "not-found") {
+    return t("qrNotFoundHeading");
+  }
+
+  if (state.qrStatus === "camera-error" || state.qrStatus === "unsupported") {
+    return t("qrCameraHeading");
+  }
+
+  return t("qrScanningHeading");
+}
+
 function handleQrPayload(rawValue) {
   const payload = String(rawValue || "").trim();
   const employee = EMPLOYEES.find((entry) => entry.qrPayload === payload);
@@ -965,12 +1160,16 @@ function handleQrPayload(rawValue) {
     return;
   }
 
-  stopCamera();
-
-  state.selectedUserId = employee.id;
-  state.qrStatus = "found";
-  state.qrMessage = t("qrFoundBody", { name: employee.fullName });
-  render();
+  goTo("collector", {
+    hasQr: true,
+    selectedUserId: employee.id,
+    qrAutoStart: false,
+    qrSamplesOpen: false,
+    collectorRunning: false,
+    collectorProgress: 0,
+    collectorComplete: false,
+    collectorMessage: "",
+  });
 }
 
 function beginCollector() {
@@ -1014,26 +1213,26 @@ function finishCollector() {
   state.collectorComplete = true;
   state.collectorProgress = 100;
   state.collectorMessage = state.hasQr
-    ? t("collectorSuccessKnown", {
+    ? t("collectorSuccessKnownV2", {
         badge: employee.oldBadge,
         name: employee.fullName,
       })
-    : t("collectorSuccessUnknown", {
+    : t("collectorSuccessUnknownV2", {
         badge: employee.oldBadge,
         name: employee.fullName,
       });
-}
 
-function continueAfterCollector() {
-  if (state.hasQr) {
-    startPrinting();
-    return;
-  }
+  scheduleAutoTransition(() => {
+    if (state.hasQr) {
+      startPrinting();
+      return;
+    }
 
-  goTo("identity", {
-    idLastName: "",
-    idError: "",
-  });
+    goTo("identity", {
+      idLastName: "",
+      idError: "",
+    });
+  }, 1000);
 }
 
 function verifyIdentityCard() {
@@ -1133,6 +1332,7 @@ function render() {
   `;
 
   attachVideoStream();
+  queueQrAutoStart();
 }
 
 function renderStage() {
@@ -1295,17 +1495,15 @@ function renderInviteStage() {
 }
 
 function renderQrStage() {
-  const employee = getEmployee();
-
   return `
-    <div class="panel-grid">
-      <article class="panel">
+    <div class="message-block">
+      <article class="panel single-panel">
         <div class="panel-copy">
           <h2>${escapeHtml(t("qrTitle"))}</h2>
-          <p>${escapeHtml(t("qrLead"))}</p>
+          <p>${escapeHtml(t("qrLeadV2"))}</p>
         </div>
         <div class="status-banner is-${statusVariant(state.qrStatus)}">
-          <strong>${escapeHtml(state.qrStatus === "found" ? t("qrFoundHeading") : t("serviceNew"))}</strong>
+          <strong>${escapeHtml(getQrStatusHeading())}</strong>
           <span>${escapeHtml(state.qrMessage || t("qrIdle"))}</span>
         </div>
         <div class="scanner-shell">
@@ -1328,39 +1526,17 @@ function renderQrStage() {
               <input id="qr-upload" type="file" accept="image/*" />
               <span>${escapeHtml(t("qrUpload"))}</span>
             </label>
+            <button class="inline-link-button" data-action="open-qr-samples">${escapeHtml(t("qrSampleLink"))}</button>
           </div>
         </div>
-        ${
-          employee && state.qrStatus === "found"
-            ? `
-              <div class="confirmation-card">
-                <strong>${escapeHtml(employee.fullName)}</strong>
-                <p>${escapeHtml(t("qrFoundBody", { name: employee.fullName }))}</p>
-                <button class="primary-button" data-action="continue-after-qr">${escapeHtml(t("continue"))}</button>
-              </div>
-            `
-            : ""
-        }
+        <div class="scanner-tips">
+          <span class="scanner-tips-title">${escapeHtml(t("qrTipsTitle"))}</span>
+          <p>${escapeHtml(t("qrTipOne"))}</p>
+          <p>${escapeHtml(t("qrTipTwo"))}</p>
+          <p>${escapeHtml(t("qrTipThree"))}</p>
+        </div>
       </article>
-      <aside class="panel sample-panel">
-        <div class="panel-copy">
-          <h3>${escapeHtml(t("sampleQrs"))}</h3>
-          <p>${escapeHtml(t("sampleQrsLead"))}</p>
-        </div>
-        <div class="sample-grid">
-          ${EMPLOYEES.map(
-            (employee) => `
-              <article class="sample-card">
-                <img src="${employee.qrFile}" alt="QR code for ${escapeHtml(employee.fullName)}" />
-                <div>
-                  <strong>${escapeHtml(employee.fullName)}</strong>
-                  <span>${escapeHtml(employee.newBadge)}</span>
-                </div>
-              </article>
-            `
-          ).join("")}
-        </div>
-      </aside>
+      ${renderQrSamplesModal()}
     </div>
   `;
 }
@@ -1368,17 +1544,25 @@ function renderQrStage() {
 function renderCollectorStage() {
   const employee = getEmployee();
   const title = state.hasQr ? t("collectorTitleKnown") : t("collectorTitleUnknown");
-  const lead = state.hasQr
-    ? t("collectorLeadKnown", { name: employee ? employee.fullName : "" })
-    : t("collectorLeadUnknown");
+  const lead = state.hasQr ? t("collectorLeadKnownV2") : t("collectorLeadUnknown");
 
   return `
-    <div class="panel-grid">
-      <article class="panel">
+    <div class="${state.hasQr ? "message-block" : "panel-grid"}">
+      <article class="panel ${state.hasQr ? "single-panel" : ""}">
         <div class="panel-copy">
           <h2>${escapeHtml(title)}</h2>
           <p>${escapeHtml(lead)}</p>
         </div>
+        ${
+          state.hasQr && employee
+            ? `
+              <div class="status-banner is-success">
+                <strong>${escapeHtml(t("collectorUserFoundTitle"))}</strong>
+                <span>${escapeHtml(t("collectorUserFoundBody", { name: employee.fullName }))}</span>
+              </div>
+            `
+            : ""
+        }
         <div class="collector-machine">
           <div class="machine-top">
             <span class="machine-chip">Collector</span>
@@ -1391,51 +1575,40 @@ function renderCollectorStage() {
             <div class="progress-fill" style="width: ${state.collectorProgress}%"></div>
           </div>
           <div class="machine-status">
-            ${escapeHtml(state.collectorMessage || (state.hasQr ? t("collectorLeadKnown", { name: employee ? employee.fullName : "" }) : t("collectorLeadUnknown")))}
+            ${escapeHtml(state.collectorMessage || (state.hasQr ? t("collectorIdleKnown") : t("collectorLeadUnknown")))}
           </div>
         </div>
         <div class="collector-tools">
-          <button class="primary-button" data-action="start-collector" ${state.collectorRunning ? "disabled" : ""}>${escapeHtml(t("collectorStart"))}</button>
-          ${
-            state.collectorComplete
-              ? `<button class="secondary-button" data-action="continue-after-collector">${escapeHtml(state.hasQr ? t("collectorContinuePrint") : t("collectorContinueIdentity"))}</button>`
-              : ""
-          }
+          <button class="primary-button" data-action="start-collector" ${state.collectorRunning || state.collectorComplete ? "disabled" : ""}>${escapeHtml(t("collectorStart"))}</button>
         </div>
       </article>
-      <aside class="panel sample-panel">
+      ${
+        state.hasQr
+          ? ""
+          : `<aside class="panel sample-panel">
         ${
-          state.hasQr
-            ? employee
-              ? `
-                <div class="panel-copy">
-                  <h3>${escapeHtml(employee.fullName)}</h3>
-                  <p>${escapeHtml(employee.department)}</p>
-                </div>
-                ${renderBadgeIdentity(employee)}
-              `
-              : ""
-            : `
-                <div class="panel-copy">
-                  <h3>${escapeHtml(t("sampleBadges"))}</h3>
-                  <p>${escapeHtml(t("selectDemoBadge"))}</p>
-                </div>
-                <div class="sample-grid">
-                  ${EMPLOYEES.map(
-                    (entry) => `
-                      <button class="sample-card sample-badge ${state.selectedUserId === entry.id ? "is-selected" : ""}" data-action="select-demo-badge" data-employee="${entry.id}">
-                        <div class="sample-badge-top">
-                          <strong>${escapeHtml(entry.fullName)}</strong>
-                          <span>${escapeHtml(entry.oldBadge)}</span>
-                        </div>
-                        <span>${escapeHtml(entry.department)}</span>
-                      </button>
-                    `
-                  ).join("")}
-                </div>
-              `
+          `
+            <div class="panel-copy">
+              <h3>${escapeHtml(t("sampleBadges"))}</h3>
+              <p>${escapeHtml(t("selectDemoBadge"))}</p>
+            </div>
+            <div class="sample-grid">
+              ${EMPLOYEES.map(
+                (entry) => `
+                  <button class="sample-card sample-badge ${state.selectedUserId === entry.id ? "is-selected" : ""}" data-action="select-demo-badge" data-employee="${entry.id}">
+                    <div class="sample-badge-top">
+                      <strong>${escapeHtml(entry.fullName)}</strong>
+                      <span>${escapeHtml(entry.oldBadge)}</span>
+                    </div>
+                    <span>${escapeHtml(entry.department)}</span>
+                  </button>
+                `
+              ).join("")}
+            </div>
+          `
         }
-      </aside>
+          </aside>`
+      }
     </div>
   `;
 }
@@ -1445,27 +1618,25 @@ function renderIdentityStage() {
 
   return `
     <div class="message-block">
-      <div class="identity-layout">
-        <div class="panel">
-          <div class="panel-copy">
-            <h2>${escapeHtml(t("identityTitle"))}</h2>
-            <p>${escapeHtml(t("identityLead", { name: employee ? employee.fullName : "" }))}</p>
-          </div>
-          <div class="record-card">
-            <span class="record-label">${escapeHtml(t("identityRecord"))}</span>
-            <strong>${escapeHtml(employee ? employee.fullName : "")}</strong>
-            <span>${escapeHtml(employee ? employee.oldBadge : "")}</span>
-          </div>
-          <label class="field-label" for="identity-last-name">${escapeHtml(t("identityLabel"))}</label>
-          <input id="identity-last-name" class="text-input" type="text" value="${escapeHtml(state.idLastName)}" autocomplete="off" />
-          ${
-            state.idError
-              ? `<div class="status-banner is-error"><strong>${escapeHtml(t("identityTitle"))}</strong><span>${escapeHtml(state.idError)}</span></div>`
-              : ""
-          }
-          <button class="primary-button" data-action="verify-identity">${escapeHtml(t("identityButton"))}</button>
+      <div class="panel single-panel">
+        <div class="panel-copy">
+          <h2>${escapeHtml(t("identityTitle"))}</h2>
+          <p>${escapeHtml(t("identityLead", { name: employee ? employee.fullName : "" }))}</p>
         </div>
-        ${employee ? renderBadgeIdentity(employee) : ""}
+        <div class="record-card">
+          <span class="record-label">${escapeHtml(t("identityRecord"))}</span>
+          <strong>${escapeHtml(employee ? employee.fullName : "")}</strong>
+          <span>${escapeHtml(employee ? employee.oldBadge : "")}</span>
+        </div>
+        ${renderOcrScannerVisual(employee)}
+        <label class="field-label" for="identity-last-name">${escapeHtml(t("identityLabel"))}</label>
+        <input id="identity-last-name" class="text-input" type="text" value="${escapeHtml(state.idLastName)}" autocomplete="off" />
+        ${
+          state.idError
+            ? `<div class="status-banner is-error"><strong>${escapeHtml(t("identityTitle"))}</strong><span>${escapeHtml(state.idError)}</span></div>`
+            : ""
+        }
+        <button class="primary-button" data-action="verify-identity">${escapeHtml(t("identityButton"))}</button>
       </div>
     </div>
   `;
@@ -1475,12 +1646,22 @@ function renderPrintingStage() {
   const employee = getEmployee();
 
   return `
-    <div class="panel-grid">
-      <article class="panel">
+    <div class="message-block">
+      <article class="panel single-panel">
         <div class="panel-copy">
           <h2>${escapeHtml(state.printComplete ? t("completionTitle") : t("printingTitle"))}</h2>
-          <p>${escapeHtml(state.printComplete ? t("completionBody", { name: employee ? employee.fullName : "" }) : t("printingLead"))}</p>
+          <p>${escapeHtml(state.printComplete ? t("completionBody", { name: employee ? employee.fullName : "" }) : t("printingLeadV2"))}</p>
         </div>
+        ${
+          state.hasQr && employee
+            ? `
+              <div class="status-banner is-success">
+                <strong>${escapeHtml(t("printingMatchTitle"))}</strong>
+                <span>${escapeHtml(t("printingMatchBody", { name: employee.fullName }))}</span>
+              </div>
+            `
+            : ""
+        }
         <div class="print-progress">
           <div class="progress-track large">
             <div class="progress-fill" style="width: ${state.printProgress}%"></div>
@@ -1510,27 +1691,75 @@ function renderPrintingStage() {
             `;
           }).join("")}
         </div>
+        <div class="badge-showcase">
+          ${employee ? renderFinalBadge(employee) : ""}
+        </div>
         ${
           state.printComplete
             ? `<button class="primary-button" data-action="start-over">${escapeHtml(t("returnStart"))}</button>`
             : ""
         }
       </article>
-      <aside class="panel badge-panel">
-        ${employee ? renderFinalBadge(employee) : ""}
-      </aside>
     </div>
   `;
 }
 
-function renderBadgeIdentity(employee) {
+function renderQrSamplesModal() {
+  if (!state.qrSamplesOpen) {
+    return "";
+  }
+
   return `
-    <div class="identity-preview">
-      <img class="portrait" src="${employee.portrait}" alt="Portrait of ${escapeHtml(employee.fullName)}" />
-      <div class="identity-details">
-        <strong>${escapeHtml(employee.fullName)}</strong>
-        <span>${escapeHtml(employee.department)}</span>
-        <span>${escapeHtml(employee.oldBadge)} -> ${escapeHtml(employee.newBadge)}</span>
+    <div class="modal-shell" data-action="close-qr-samples">
+      <div class="modal-card" role="dialog" aria-modal="true" aria-label="${escapeHtml(t("sampleQrs"))}">
+        <div class="modal-head">
+          <div>
+            <h3>${escapeHtml(t("sampleQrs"))}</h3>
+            <p>${escapeHtml(t("sampleQrsLead"))}</p>
+          </div>
+          <button class="ghost-button" data-action="close-qr-samples">${escapeHtml(t("sampleQrsClose"))}</button>
+        </div>
+        <div class="sample-grid modal-grid">
+          ${EMPLOYEES.map(
+            (employee) => `
+              <article class="sample-card modal-sample-card">
+                <img src="${employee.qrFile}" alt="QR code for ${escapeHtml(employee.fullName)}" />
+                <div>
+                  <strong>${escapeHtml(employee.fullName)}</strong>
+                  <span>${escapeHtml(employee.newBadge)}</span>
+                </div>
+              </article>
+            `
+          ).join("")}
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function renderOcrScannerVisual(employee) {
+  return `
+    <div class="ocr-demo">
+      <div class="ocr-copy">
+        <strong>${escapeHtml(t("identityVisualTitle"))}</strong>
+        <span>${escapeHtml(t("identityVisualLead"))}</span>
+      </div>
+      <div class="ocr-stage">
+        <div class="ocr-id-card">
+          <div class="ocr-id-head">ID</div>
+          <div class="ocr-id-body">
+            <img class="ocr-id-portrait" src="${employee ? employee.portrait : ""}" alt="" />
+            <div class="ocr-id-lines">
+              <span>${escapeHtml(employee ? employee.firstName : "")}</span>
+              <span>${escapeHtml(employee ? employee.lastName : "")}</span>
+              <span>${escapeHtml(employee ? employee.newBadge : "")}</span>
+            </div>
+          </div>
+        </div>
+        <div class="ocr-scanner">
+          <div class="ocr-glass"></div>
+          <span>OCR Scanner</span>
+        </div>
       </div>
     </div>
   `;
@@ -1549,7 +1778,7 @@ function renderFinalBadge(employee) {
       <div class="badge-body">
         <img class="portrait" src="${employee.portrait}" alt="Portrait of ${escapeHtml(employee.fullName)}" />
         <div class="badge-copy">
-          <span class="badge-type">${escapeHtml(t("badgeType"))}</span>
+          <span class="badge-type">${escapeHtml(t("badgeTypeV2"))}</span>
           <strong class="badge-name">${escapeHtml(employee.firstName)}</strong>
           <strong class="badge-name">${escapeHtml(employee.lastName)}</strong>
           <span class="badge-number-label">${escapeHtml(t("badgeNumber"))}</span>
@@ -1674,30 +1903,31 @@ app.addEventListener("click", (event) => {
     return;
   }
 
-  if (action === "continue-after-qr") {
-    goTo("collector", {
-      collectorRunning: false,
-      collectorProgress: 0,
-      collectorComplete: false,
-      collectorMessage: "",
-    });
+  if (action === "open-qr-samples") {
+    state.qrSamplesOpen = true;
+    render();
+    return;
+  }
+
+  if (action === "close-qr-samples") {
+    if (event.target === trigger || trigger.dataset.action === "close-qr-samples") {
+      state.qrSamplesOpen = false;
+      render();
+    }
     return;
   }
 
   if (action === "select-demo-badge") {
     state.selectedUserId = trigger.dataset.employee;
     state.collectorMessage = "";
+    state.collectorComplete = false;
+    state.collectorProgress = 0;
     render();
     return;
   }
 
   if (action === "start-collector") {
     beginCollector();
-    return;
-  }
-
-  if (action === "continue-after-collector") {
-    continueAfterCollector();
     return;
   }
 
